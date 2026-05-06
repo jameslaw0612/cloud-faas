@@ -1,0 +1,10 @@
+FROM golang:1.22-alpine
+
+RUN adduser -D appuser
+
+WORKDIR /function
+RUN chown appuser:appuser /function
+
+USER appuser
+
+CMD ["sh", "-c", "go run handler.go"]
