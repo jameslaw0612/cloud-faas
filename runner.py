@@ -1,8 +1,12 @@
 import io
 import json
 import tarfile
+import threading
+import uuid
 from datetime import datetime, timezone
+from queue import Empty, Queue
 from pathlib import Path
+from dataclasses import dataclass, field
 
 import docker
 from docker.errors import DockerException, ImageNotFound
@@ -40,6 +44,18 @@ RUNTIME_CONFIGS = {
 SUPPORTED_LANGUAGES = sorted(RUNTIME_CONFIGS.keys())
 
 
+@dataclass
+class InteractiveSession:
+    session_id: str
+    container: object
+    socket: object
+    output_queue: Queue = field(default_factory=Queue)
+    reader_thread: threading.Thread | None = None
+    active: bool = True
+    cleaned_up: bool = False
+    cleanup_lock: threading.Lock = field(default_factory=threading.Lock)
+
+
 def _build_code_archive(filename: str, code: str) -> bytes:
     data = code.encode("utf-8")
     archive_stream = io.BytesIO()
@@ -57,8 +73,245 @@ def _get_docker_client():
     return docker.from_env()
 
 
+INTERACTIVE_SESSIONS: dict[str, InteractiveSession] = {}
+INTERACTIVE_SESSIONS_LOCK = threading.Lock()
+
+
 def get_runtime_extension(language: str) -> str:
     return RUNTIME_CONFIGS[language]["extension"]
+
+
+def _discard_interactive_session(session_id: str) -> None:
+    with INTERACTIVE_SESSIONS_LOCK:
+        INTERACTIVE_SESSIONS.pop(session_id, None)
+
+
+def _cleanup_interactive_session(session: InteractiveSession) -> None:
+    with session.cleanup_lock:
+        if session.cleaned_up:
+            return
+
+        session.active = False
+
+        try:
+            session.socket.close()
+        except Exception:
+            pass
+
+        try:
+            session.container.remove(force=True)
+        except Exception:
+            pass
+
+        session.cleaned_up = True
+
+
+def _interactive_reader(session: InteractiveSession) -> None:
+    try:
+        while session.active:
+            chunk = session.socket.recv(4096)
+            if not chunk:
+                break
+
+            session.output_queue.put(chunk.decode("utf-8", errors="replace"))
+    except Exception as exc:
+        error_text = str(exc)
+        is_expected_pipe_close = "The pipe has been ended" in error_text
+
+        if session.active and not is_expected_pipe_close:
+            session.output_queue.put(f"\n[interactive stream error] {exc}\n")
+    finally:
+        _cleanup_interactive_session(session)
+        session.output_queue.put("\n[interactive session finished]\n")
+        session.output_queue.put(None)
+
+
+def start_interactive_python_session(code: str) -> dict:
+    runtime = RUNTIME_CONFIGS["python"]
+    code_size = len(code.encode("utf-8"))
+
+    if code_size == 0:
+        return {
+            "error": "No code submitted",
+            "details": "Provide Python source code to execute.",
+        }
+
+    if code_size > MAX_CODE_SIZE_BYTES:
+        return {
+            "error": "Code is too large",
+            "details": f"Maximum size is {MAX_CODE_SIZE_BYTES} bytes.",
+        }
+
+    container = None
+    socket = None
+
+    try:
+        client = _get_docker_client()
+        container = client.containers.create(
+            image=runtime["image"],
+            command=runtime["command"],
+            working_dir="/function",
+            mem_limit="128m",
+            cpu_period=100000,
+            cpu_quota=50000,
+            network_disabled=True,
+            detach=True,
+            stdin_open=True,
+            tty=True,
+        )
+
+        archive = _build_code_archive(runtime["filename"], code)
+        container.put_archive("/function", archive)
+
+        socket = container.attach_socket(
+            params={
+                "stdin": 1,
+                "stdout": 1,
+                "stderr": 1,
+                "stream": 1,
+                "logs": 1,
+            }
+        )
+
+        if hasattr(socket, "settimeout"):
+            socket.settimeout(None)
+
+        container.start()
+
+        session_id = uuid.uuid4().hex
+        session = InteractiveSession(
+            session_id=session_id,
+            container=container,
+            socket=socket,
+        )
+
+        reader_thread = threading.Thread(
+            target=_interactive_reader,
+            args=(session,),
+            daemon=True,
+            name=f"interactive-session-{session_id}",
+        )
+        session.reader_thread = reader_thread
+
+        with INTERACTIVE_SESSIONS_LOCK:
+            INTERACTIVE_SESSIONS[session_id] = session
+
+        reader_thread.start()
+
+        return {"session_id": session_id}
+    except ImageNotFound:
+        if socket is not None:
+            try:
+                socket.close()
+            except Exception:
+                pass
+        if container is not None:
+            try:
+                container.remove(force=True)
+            except Exception:
+                pass
+        return {
+            "error": "Runtime image not found",
+            "details": f"Build the Docker image '{runtime['image']}' before starting interactive mode.",
+        }
+    except DockerException as exc:
+        if socket is not None:
+            try:
+                socket.close()
+            except Exception:
+                pass
+        if container is not None:
+            try:
+                container.remove(force=True)
+            except Exception:
+                pass
+        return {
+            "error": "Docker is unavailable",
+            "details": str(exc),
+        }
+    except Exception as exc:
+        if socket is not None:
+            try:
+                socket.close()
+            except Exception:
+                pass
+        if container is not None:
+            try:
+                container.remove(force=True)
+            except Exception:
+                pass
+        return {
+            "error": "Interactive session failed",
+            "details": str(exc),
+        }
+
+
+def get_interactive_session(session_id: str) -> InteractiveSession | None:
+    with INTERACTIVE_SESSIONS_LOCK:
+        return INTERACTIVE_SESSIONS.get(session_id)
+
+
+def send_interactive_input(session_id: str, text: str) -> bool:
+    session = get_interactive_session(session_id)
+    if session is None or not session.active:
+        return False
+
+    try:
+        session.socket.sendall((text + "\n").encode("utf-8"))
+        return True
+    except Exception:
+        return False
+
+
+def read_interactive_output(session_id: str) -> dict:
+    session = get_interactive_session(session_id)
+    if session is None:
+        return {
+            "found": False,
+            "active": False,
+            "chunks": [],
+        }
+
+    chunks: list[str] = []
+
+    while True:
+        try:
+            chunk = session.output_queue.get_nowait()
+        except Empty:
+            break
+
+        if chunk is None:
+            session.active = False
+            _discard_interactive_session(session.session_id)
+            break
+
+        chunks.append(chunk)
+
+    return {
+        "found": True,
+        "active": session.active,
+        "chunks": chunks,
+    }
+
+
+def stop_interactive_session(session_id: str) -> bool:
+    with INTERACTIVE_SESSIONS_LOCK:
+        session = INTERACTIVE_SESSIONS.pop(session_id, None)
+
+    if session is None:
+        return False
+
+    _cleanup_interactive_session(session)
+
+    if (
+        session.reader_thread is not None
+        and session.reader_thread.is_alive()
+        and threading.current_thread() is not session.reader_thread
+    ):
+        session.reader_thread.join(timeout=1)
+
+    session.output_queue.put(None)
+    return True
 
 
 def _write_history(record: dict) -> None:

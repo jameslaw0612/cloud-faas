@@ -10,7 +10,11 @@ from runner import (
     SUPPORTED_LANGUAGES,
     get_recent_executions,
     get_runtime_extension,
+    read_interactive_output,
     run_function,
+    send_interactive_input,
+    start_interactive_python_session,
+    stop_interactive_session,
 )
 
 
@@ -20,7 +24,7 @@ UI_PATH = APP_ROOT / "web" / "index.html"
 app = FastAPI(
     title="Cloud FaaS Demo",
     description="A minimal Function-as-a-Service API that runs submitted code inside Docker containers.",
-    version="2.0.0",
+    version="2.1.0",
 )
 
 
@@ -37,6 +41,20 @@ class FunctionResponse(BaseModel):
     language: Optional[str] = None
     submitted_file: Optional[str] = None
     request_source: Optional[str] = None
+
+
+class InteractiveStartRequest(BaseModel):
+    code: str = Field(..., examples=['name = input("Name: ")\nprint(f"Hello, {name}")'])
+
+
+class InteractiveStartResponse(BaseModel):
+    session_id: Optional[str] = None
+    error: Optional[str] = None
+    details: Optional[str] = None
+
+
+class InteractiveInputRequest(BaseModel):
+    text: str = Field(..., examples=["Alice"])
 
 
 class HistoryRecord(BaseModel):
@@ -108,6 +126,7 @@ def status() -> dict:
         "message": "FaaS is running!",
         "supported_languages": SUPPORTED_LANGUAGES,
         "max_code_size_bytes": MAX_CODE_SIZE_BYTES,
+        "interactive_python_mvp": True,
     }
 
 
@@ -153,3 +172,26 @@ async def run_uploaded_file(
         submitted_file=original_filename,
         request_source="upload",
     )
+
+
+@app.post("/interactive/python/start", response_model=InteractiveStartResponse)
+def start_interactive_python(req: InteractiveStartRequest) -> dict:
+    _validate_code_size(req.code)
+    return start_interactive_python_session(req.code)
+
+
+@app.post("/interactive/python/stop/{session_id}")
+def stop_interactive_python(session_id: str) -> dict:
+    stopped = stop_interactive_session(session_id)
+    return {"stopped": stopped}
+
+
+@app.post("/interactive/python/input/{session_id}")
+def interactive_python_input(session_id: str, req: InteractiveInputRequest) -> dict:
+    sent = send_interactive_input(session_id, req.text)
+    return {"sent": sent}
+
+
+@app.get("/interactive/python/output/{session_id}")
+def interactive_python_output(session_id: str) -> dict:
+    return read_interactive_output(session_id)

@@ -8,6 +8,7 @@ A small Function-as-a-Service project built with FastAPI and Docker. It can exec
 - Separate Docker runtime images per language
 - File upload support using `multipart/form-data`
 - Inline code execution using JSON
+- Interactive Python MVP for programs that use `input()`
 - Browser UI for running functions
 - Execution history log for recent runs
 - Memory, CPU, and timeout limits for each container
@@ -78,6 +79,45 @@ Then open:
 - `http://127.0.0.1:8000/docs` for Swagger UI
 - `http://127.0.0.1:8000/api/status` for API status
 
+## Interactive Python MVP
+
+This project now includes a separate interactive mode for Python programs that call `input()`.
+
+Important:
+
+- This mode is Python-only
+- It is separate from the normal stateless FaaS `/run` flow
+- It keeps a Python container alive for a short session so you can send follow-up input
+- The browser polls for output and sends your replies back through regular HTTP endpoints
+
+### Example interactive code
+
+```python
+name = input("Enter your name: ")
+course = input("Enter your course: ")
+print(f"Hello, {name} from {course}!")
+```
+
+### How to use it
+
+1. Open the web UI at `http://127.0.0.1:8000/`
+2. Make sure the language is set to `Python`
+3. Paste your Python code into the main code box
+4. Click `Start Interactive Python`
+5. When your program shows a prompt, type your answer in the interactive input box
+6. Click `Send Input` or press `Enter`
+7. Click `Stop Session` when finished
+
+### What this mode is for
+
+- demonstrating live `input()` support
+- showing a stateful execution session
+- comparing normal stateless FaaS vs interactive container execution
+
+### Limitation
+
+This interactive session is a lightweight MVP. It is meant for demos, not for multi-user production use.
+
 ## Optional: Run the API with Docker
 
 Build the API container from the project root:
@@ -130,6 +170,22 @@ Form fields:
 
 - `language`
 - `file`
+
+### `POST /interactive/python/start`
+
+Starts a Python-only interactive session from pasted code.
+
+### `POST /interactive/python/stop/{session_id}`
+
+Stops an interactive Python session.
+
+### `POST /interactive/python/input/{session_id}`
+
+Sends one line of input to a running interactive Python session.
+
+### `GET /interactive/python/output/{session_id}`
+
+Returns any new output produced by a running interactive Python session.
 
 ## Sample Tests
 

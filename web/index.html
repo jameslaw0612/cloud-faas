@@ -141,7 +141,8 @@
 
         select,
         textarea,
-        input[type="file"] {
+        input[type="file"],
+        input[type="text"] {
             width: 100%;
             border-radius: 18px;
             border: 1px solid rgba(109, 76, 45, 0.18);
@@ -255,6 +256,26 @@
             font-style: italic;
         }
 
+        .inline-actions {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+
+        .secondary-button {
+            border: 1px solid var(--line);
+            border-radius: 18px;
+            background: #fff8ef;
+            color: var(--text);
+            padding: 14px 20px;
+            cursor: pointer;
+        }
+
+        .secondary-button:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+
         @media (max-width: 900px) {
             .grid {
                 grid-template-columns: 1fr;
@@ -305,13 +326,13 @@
                         <div id="codeSection">
                             <label for="codeInput">Function code</label>
                             <textarea id="codeInput" name="code">print("Hello from Cloud FaaS")</textarea>
-                            <div class="hint">Paste plain source code here when you want to run the JSON endpoint.</div>
+                            <div class="hint">Paste plain source code here when you want to run the JSON endpoint. Python code that uses <code>input()</code> will use the input field below after you click <code>Run Function</code>.</div>
                         </div>
 
                         <div id="uploadSection" class="hidden">
                             <label for="fileInput">Upload file</label>
                             <input id="fileInput" name="file" type="file" accept=".py,.js,.go">
-                            <div class="hint">Accepted extensions: <code>.py</code>, <code>.js</code>, <code>.go</code>.</div>
+                            <div class="hint">Accepted extensions: <code>.py</code>, <code>.js</code>, <code>.go</code>. Uploaded Python files that use <code>input()</code> will switch into the same live input flow.</div>
                         </div>
 
                         <div>
@@ -349,6 +370,26 @@
             </aside>
         </section>
 
+        <section id="interactiveSection" class="card" style="margin-top: 22px;">
+            <div class="card-body stack">
+                <div>
+                    <h2>Optional Interactive Python MVP</h2>
+                    <p class="meta">Run Python from the main button above. If the program pauses at <code>input()</code>, reply here and the shared output box will continue updating.</p>
+                </div>
+                <div class="hint">Use Python only. The output appears in the single <code>Execution result</code> box above.</div>
+                <div class="inline-actions">
+                    <button id="interactiveStopButton" class="secondary-button" type="button">Stop Session</button>
+                </div>
+                <div>
+                    <label for="interactiveInput">Interactive input</label>
+                    <input id="interactiveInput" type="text" placeholder="Type a reply for input() and press Send or Enter">
+                </div>
+                <div class="inline-actions">
+                    <button id="interactiveSendButton" class="secondary-button" type="button">Send Input</button>
+                </div>
+            </div>
+        </section>
+
         <section class="card" style="margin-top: 22px;">
             <div class="card-body stack">
                 <div>
@@ -373,8 +414,27 @@
         const languageSelect = document.getElementById("language");
         const codeInput = document.getElementById("codeInput");
         const fileInput = document.getElementById("fileInput");
+        const interactiveSection = document.getElementById("interactiveSection");
+        const interactiveStopButton = document.getElementById("interactiveStopButton");
+        const interactiveSendButton = document.getElementById("interactiveSendButton");
+        const interactiveInput = document.getElementById("interactiveInput");
 
         let mode = "code";
+        let interactiveSessionId = null;
+        let interactivePollHandle = null;
+
+        function updateInteractiveVisibility() {
+            const shouldShowInteractive = languageSelect.value === "python";
+            interactiveSection.classList.toggle("hidden", !shouldShowInteractive);
+
+            if (!shouldShowInteractive && interactiveSessionId) {
+                stopInteractiveSession({ preserveOutput: true }).catch(() => {
+                    resetInteractiveState({ preserveOutput: true });
+                });
+            }
+
+            updateInteractiveControlsState();
+        }
 
         function setMode(nextMode) {
             mode = nextMode;
@@ -384,6 +444,7 @@
             uploadSection.classList.toggle("hidden", isCode);
             codeModeButton.classList.toggle("active", isCode);
             uploadModeButton.classList.toggle("active", !isCode);
+            updateInteractiveVisibility();
         }
 
         function formatResult(data) {
@@ -394,6 +455,51 @@
 
             resultOutput.classList.remove("result-error");
             return data.output || "(No output)";
+        }
+
+        function isResultPlaceholder() {
+            return [
+                "Waiting for a run...",
+                "Executing function...",
+                "Running Python code...",
+            ].includes(resultOutput.textContent);
+        }
+
+        function setResultMessage(message, { isError = false } = {}) {
+            resultOutput.classList.toggle("result-error", isError);
+            resultOutput.textContent = message;
+        }
+
+        function appendResultOutput(text) {
+            resultOutput.classList.remove("result-error");
+
+            if (isResultPlaceholder()) {
+                resultOutput.textContent = "";
+            }
+
+            resultOutput.textContent += text;
+            resultOutput.scrollTop = resultOutput.scrollHeight;
+        }
+
+        function pythonCodeNeedsInteractiveInput(code) {
+            return /\binput\s*\(/.test(code);
+        }
+
+        function updateInteractiveControlsState() {
+            const canUsePythonInput = languageSelect.value === "python";
+            const sessionActive = Boolean(interactiveSessionId);
+
+            interactiveInput.disabled = !canUsePythonInput || !sessionActive;
+            interactiveSendButton.disabled = !canUsePythonInput || !sessionActive;
+            interactiveStopButton.disabled = !sessionActive;
+
+            if (!canUsePythonInput) {
+                interactiveInput.placeholder = "Switch to Python to use live input.";
+            } else if (!sessionActive) {
+                interactiveInput.placeholder = "Run Python code that uses input() to reply here.";
+            } else {
+                interactiveInput.placeholder = "Type a reply for input() and press Send or Enter";
+            }
         }
 
         async function loadStatus() {
@@ -408,7 +514,7 @@
 
         async function loadHistory() {
             try {
-                const response = await fetch("/history?limit=6");
+                const response = await fetch("/history?limit=2");
                 const data = await response.json();
 
                 if (!Array.isArray(data) || data.length === 0) {
@@ -437,6 +543,138 @@
         codeModeButton.addEventListener("click", () => setMode("code"));
         uploadModeButton.addEventListener("click", () => setMode("upload"));
 
+        function resetInteractiveState({ preserveOutput = false, message = "Waiting for a run..." } = {}) {
+            if (interactivePollHandle) {
+                clearInterval(interactivePollHandle);
+                interactivePollHandle = null;
+            }
+
+            interactiveSessionId = null;
+            interactiveInput.value = "";
+
+            if (!preserveOutput) {
+                setResultMessage(message);
+            } else if (isResultPlaceholder()) {
+                setResultMessage("(No output)");
+            }
+
+            updateInteractiveControlsState();
+        }
+
+        async function stopInteractiveSession({ preserveOutput = false } = {}) {
+            if (!interactiveSessionId) {
+                resetInteractiveState({ preserveOutput });
+                return false;
+            }
+
+            const sessionId = interactiveSessionId;
+            resetInteractiveState({ preserveOutput });
+
+            try {
+                await fetch(`/interactive/python/stop/${sessionId}`, { method: "POST" });
+            } catch (error) {
+                if (!preserveOutput) {
+                    setResultMessage("Interactive session stopped locally.");
+                }
+            }
+
+            return true;
+        }
+
+        async function pollInteractiveOutput() {
+            if (!interactiveSessionId) {
+                return;
+            }
+
+            try {
+                const response = await fetch(`/interactive/python/output/${interactiveSessionId}`);
+                const data = await response.json();
+
+                if (!data.found) {
+                    resetInteractiveState({
+                        preserveOutput: !isResultPlaceholder(),
+                        message: "[interactive session not found]",
+                    });
+                    return;
+                }
+
+                for (const chunk of data.chunks) {
+                    appendResultOutput(chunk);
+                }
+
+                if (!data.active) {
+                    resetInteractiveState({ preserveOutput: true });
+                }
+            } catch (error) {
+                resetInteractiveState({
+                    preserveOutput: !isResultPlaceholder(),
+                    message: "[interactive polling failed]",
+                });
+            }
+        }
+
+        async function startInteractiveSession(code) {
+            if (languageSelect.value !== "python") {
+                setResultMessage("Interactive mode is Python-only in this MVP.");
+                return;
+            }
+
+            if (!code) {
+                setResultMessage("Provide Python code before starting interactive input.");
+                return;
+            }
+
+            await stopInteractiveSession({ preserveOutput: true });
+            setResultMessage("Running Python code...");
+
+            const response = await fetch("/interactive/python/start", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ code }),
+            });
+
+            const data = await response.json();
+
+            if (data.error || !data.session_id) {
+                setResultMessage(
+                    `Error: ${data.error || "Could not start session"}\n\n${data.details || ""}`,
+                    { isError: true }
+                );
+                return;
+            }
+
+            interactiveSessionId = data.session_id;
+            updateInteractiveControlsState();
+            interactiveInput.focus();
+            interactivePollHandle = setInterval(pollInteractiveOutput, 500);
+            await pollInteractiveOutput();
+        }
+
+        async function sendInteractiveLine() {
+            if (!interactiveSessionId) {
+                setResultMessage("Run Python code that uses input() first.");
+                return;
+            }
+
+            const text = interactiveInput.value;
+
+            const response = await fetch(`/interactive/python/input/${interactiveSessionId}`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ text }),
+            });
+
+            const data = await response.json();
+            if (!data.sent) {
+                appendResultOutput("\n[interactive input could not be sent]\n");
+                return;
+            }
+
+            interactiveInput.value = "";
+            interactiveInput.focus();
+            await pollInteractiveOutput();
+        }
+
         languageSelect.addEventListener("change", () => {
             const templates = {
                 python: 'print("Hello from Cloud FaaS")',
@@ -447,6 +685,30 @@
             if (mode === "code") {
                 codeInput.value = templates[languageSelect.value];
             }
+
+            updateInteractiveVisibility();
+        });
+
+        interactiveStopButton.addEventListener("click", async () => {
+            const stopped = await stopInteractiveSession({ preserveOutput: true });
+            if (stopped) {
+                appendResultOutput("\n[interactive session stopped]\n");
+            }
+        });
+
+        interactiveSendButton.addEventListener("click", () => {
+            sendInteractiveLine().catch((error) => {
+                setResultMessage(error.message, { isError: true });
+            });
+        });
+
+        interactiveInput.addEventListener("keydown", (event) => {
+            if (event.key === "Enter") {
+                event.preventDefault();
+                sendInteractiveLine().catch((error) => {
+                    setResultMessage(error.message, { isError: true });
+                });
+            }
         });
 
         form.addEventListener("submit", async (event) => {
@@ -454,11 +716,46 @@
 
             runButton.disabled = true;
             runButton.textContent = "Running...";
-            resultOutput.classList.remove("result-error");
-            resultOutput.textContent = "Executing function...";
 
             try {
                 let response;
+                let uploadedCode = null;
+                const shouldUsePythonInteractive =
+                    mode === "code"
+                    && languageSelect.value === "python"
+                    && pythonCodeNeedsInteractiveInput(codeInput.value);
+
+                if (mode === "upload" && !fileInput.files.length) {
+                    throw new Error("Choose a file before running upload mode.");
+                }
+
+                if (
+                    mode === "upload"
+                    && languageSelect.value === "python"
+                    && fileInput.files.length
+                    && fileInput.files[0].name.toLowerCase().endsWith(".py")
+                ) {
+                    uploadedCode = await fileInput.files[0].text();
+                }
+
+                const shouldUseUploadedPythonInteractive =
+                    uploadedCode !== null && pythonCodeNeedsInteractiveInput(uploadedCode);
+
+                if (shouldUsePythonInteractive) {
+                    await startInteractiveSession(codeInput.value);
+                    await loadHistory();
+                    return;
+                }
+
+                if (shouldUseUploadedPythonInteractive) {
+                    await startInteractiveSession(uploadedCode);
+                    await loadHistory();
+                    return;
+                }
+
+                await stopInteractiveSession({ preserveOutput: true });
+                resultOutput.classList.remove("result-error");
+                resultOutput.textContent = "Executing function...";
 
                 if (mode === "code") {
                     response = await fetch("/run", {
@@ -470,10 +767,6 @@
                         }),
                     });
                 } else {
-                    if (!fileInput.files.length) {
-                        throw new Error("Choose a file before running upload mode.");
-                    }
-
                     const formData = new FormData();
                     formData.append("language", languageSelect.value);
                     formData.append("file", fileInput.files[0]);
@@ -485,11 +778,12 @@
                 }
 
                 const data = await response.json();
-                resultOutput.textContent = formatResult(data.detail || data);
+                setResultMessage(formatResult(data.detail || data), {
+                    isError: Boolean((data.detail || data).error),
+                });
                 await loadHistory();
             } catch (error) {
-                resultOutput.classList.add("result-error");
-                resultOutput.textContent = error.message;
+                setResultMessage(error.message, { isError: true });
             } finally {
                 runButton.disabled = false;
                 runButton.textContent = "Run Function";
