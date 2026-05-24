@@ -13,7 +13,7 @@ from runner import (
     read_interactive_output,
     run_function,
     send_interactive_input,
-    start_interactive_python_session,
+    start_interactive_session,
     stop_interactive_session,
 )
 
@@ -44,6 +44,7 @@ class FunctionResponse(BaseModel):
 
 
 class InteractiveStartRequest(BaseModel):
+    language: str = Field(..., examples=["python"])
     code: str = Field(..., examples=['name = input("Name: ")\nprint(f"Hello, {name}")'])
 
 
@@ -126,7 +127,7 @@ def status() -> dict:
         "message": "FaaS is running!",
         "supported_languages": SUPPORTED_LANGUAGES,
         "max_code_size_bytes": MAX_CODE_SIZE_BYTES,
-        "interactive_python_mvp": True,
+        "interactive_languages": SUPPORTED_LANGUAGES,
     }
 
 
@@ -174,24 +175,46 @@ async def run_uploaded_file(
     )
 
 
-@app.post("/interactive/python/start", response_model=InteractiveStartResponse)
-def start_interactive_python(req: InteractiveStartRequest) -> dict:
+@app.post("/interactive/start", response_model=InteractiveStartResponse)
+def start_interactive(req: InteractiveStartRequest) -> dict:
+    language = _normalize_language(req.language)
     _validate_code_size(req.code)
-    return start_interactive_python_session(req.code)
+    return start_interactive_session(language, req.code)
 
 
-@app.post("/interactive/python/stop/{session_id}")
-def stop_interactive_python(session_id: str) -> dict:
+@app.post("/interactive/stop/{session_id}")
+def stop_interactive(session_id: str) -> dict:
     stopped = stop_interactive_session(session_id)
     return {"stopped": stopped}
 
 
-@app.post("/interactive/python/input/{session_id}")
-def interactive_python_input(session_id: str, req: InteractiveInputRequest) -> dict:
+@app.post("/interactive/input/{session_id}")
+def interactive_input(session_id: str, req: InteractiveInputRequest) -> dict:
     sent = send_interactive_input(session_id, req.text)
     return {"sent": sent}
 
 
+@app.get("/interactive/output/{session_id}")
+def interactive_output(session_id: str) -> dict:
+    return read_interactive_output(session_id)
+
+
+@app.post("/interactive/python/start", response_model=InteractiveStartResponse)
+def start_interactive_python(req: InteractiveStartRequest) -> dict:
+    req.language = "python"
+    return start_interactive(req)
+
+
+@app.post("/interactive/python/stop/{session_id}")
+def stop_interactive_python(session_id: str) -> dict:
+    return stop_interactive(session_id)
+
+
+@app.post("/interactive/python/input/{session_id}")
+def interactive_python_input(session_id: str, req: InteractiveInputRequest) -> dict:
+    return interactive_input(session_id, req)
+
+
 @app.get("/interactive/python/output/{session_id}")
 def interactive_python_output(session_id: str) -> dict:
-    return read_interactive_output(session_id)
+    return interactive_output(session_id)

@@ -3,10 +3,10 @@ import json
 import tarfile
 import threading
 import uuid
-from datetime import datetime, timezone
-from queue import Empty, Queue
-from pathlib import Path
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
+from queue import Empty, Queue
 
 import docker
 from docker.errors import DockerException, ImageNotFound
@@ -27,26 +27,45 @@ RUNTIME_CONFIGS = {
         "extension": ".py",
         "command": ["python", "handler.py"],
     },
-    "node": {
+    "javascript": {
         "image": "faas-node-runtime",
         "filename": "handler.js",
         "extension": ".js",
         "command": ["node", "handler.js"],
     },
-    "go": {
-        "image": "faas-go-runtime",
-        "filename": "handler.go",
-        "extension": ".go",
-        "command": ["sh", "-c", "go run handler.go"],
+    "c": {
+        "image": "faas-c-runtime",
+        "filename": "handler.c",
+        "extension": ".c",
+        "command": ["sh", "-c", "gcc handler.c -O2 -o handler && ./handler"],
+    },
+    "cpp": {
+        "image": "faas-cpp-runtime",
+        "filename": "handler.cpp",
+        "extension": ".cpp",
+        "command": ["sh", "-c", "g++ handler.cpp -O2 -std=c++17 -o handler && ./handler"],
+    },
+    "java": {
+        "image": "faas-java-runtime",
+        "filename": "Main.java",
+        "extension": ".java",
+        "command": ["sh", "-c", "javac Main.java && java Main"],
+    },
+    "php": {
+        "image": "faas-php-runtime",
+        "filename": "handler.php",
+        "extension": ".php",
+        "command": ["php", "handler.php"],
     },
 }
 
-SUPPORTED_LANGUAGES = sorted(RUNTIME_CONFIGS.keys())
+SUPPORTED_LANGUAGES = list(RUNTIME_CONFIGS.keys())
 
 
 @dataclass
 class InteractiveSession:
     session_id: str
+    language: str
     container: object
     socket: object
     output_queue: Queue = field(default_factory=Queue)
@@ -126,14 +145,21 @@ def _interactive_reader(session: InteractiveSession) -> None:
         session.output_queue.put(None)
 
 
-def start_interactive_python_session(code: str) -> dict:
-    runtime = RUNTIME_CONFIGS["python"]
+def start_interactive_session(language: str, code: str) -> dict:
+    normalized_language = language.strip().lower()
+    runtime = RUNTIME_CONFIGS.get(normalized_language)
     code_size = len(code.encode("utf-8"))
+
+    if runtime is None:
+        return {
+            "error": f"Unsupported language: {language}",
+            "details": f"Supported languages: {', '.join(SUPPORTED_LANGUAGES)}",
+        }
 
     if code_size == 0:
         return {
             "error": "No code submitted",
-            "details": "Provide Python source code to execute.",
+            "details": f"Provide {get_language_display_name(normalized_language)} source code to execute.",
         }
 
     if code_size > MAX_CODE_SIZE_BYTES:
@@ -181,6 +207,7 @@ def start_interactive_python_session(code: str) -> dict:
         session_id = uuid.uuid4().hex
         session = InteractiveSession(
             session_id=session_id,
+            language=normalized_language,
             container=container,
             socket=socket,
         )
@@ -244,6 +271,18 @@ def start_interactive_python_session(code: str) -> dict:
             "error": "Interactive session failed",
             "details": str(exc),
         }
+
+
+def get_language_display_name(language: str) -> str:
+    display_names = {
+        "python": "Python",
+        "javascript": "JavaScript",
+        "c": "C",
+        "cpp": "C++",
+        "java": "Java",
+        "php": "PHP",
+    }
+    return display_names.get(language, language.upper())
 
 
 def get_interactive_session(session_id: str) -> InteractiveSession | None:
@@ -489,6 +528,8 @@ def run_function(
 
         response = {
             "output": stdout,
+            "error": None,
+            "details": None,
             "exit_code": exit_code,
             "language": normalized_language,
             "submitted_file": submitted_file,
