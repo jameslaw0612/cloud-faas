@@ -1,0 +1,10 @@
+FROM eclipse-temurin:21-jdk
+
+RUN useradd --create-home appuser
+
+WORKDIR /function
+RUN chown appuser:appuser /function
+
+USER appuser
+
+CMD ["sh", "-c", "javac Main.java && java Main"]

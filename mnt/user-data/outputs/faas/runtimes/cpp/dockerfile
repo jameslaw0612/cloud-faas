@@ -1,0 +1,10 @@
+FROM gcc:14
+
+RUN useradd --create-home appuser
+
+WORKDIR /function
+RUN chown appuser:appuser /function
+
+USER appuser
+
+CMD ["sh", "-c", "g++ handler.cpp -O2 -std=c++17 -o handler && ./handler"]

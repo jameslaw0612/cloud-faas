@@ -1,0 +1,10 @@
+FROM gcc:14
+
+RUN useradd --create-home appuser
+
+WORKDIR /function
+RUN chown appuser:appuser /function
+
+USER appuser
+
+CMD ["sh", "-c", "gcc handler.c -O2 -o handler && ./handler"]

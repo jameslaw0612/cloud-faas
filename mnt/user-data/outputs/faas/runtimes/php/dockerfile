@@ -1,0 +1,10 @@
+FROM php:8.3-cli
+
+RUN useradd --create-home appuser
+
+WORKDIR /function
+RUN chown appuser:appuser /function
+
+USER appuser
+
+CMD ["php", "handler.php"]
