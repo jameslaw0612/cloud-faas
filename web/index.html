@@ -396,6 +396,20 @@
             transition: 180ms ease;
         }
 
+        .topic-card:not(.active) .detail-meta,
+        .topic-card:not(.active) .detail-block,
+        .topic-card:not(.active) .inline-actions {
+            display: none;
+        }
+
+        .topic-card > h3 {
+            margin-bottom: 10px;
+        }
+
+        .topic-card > p {
+            margin-bottom: 14px;
+        }
+
         .topic-card.active {
             border-color: rgba(182, 84, 43, 0.4);
             background: rgba(244, 215, 191, 0.72);
@@ -431,11 +445,13 @@
             display: flex;
             gap: 10px;
             flex-wrap: wrap;
+            margin-bottom: 8px;
         }
 
         .detail-block {
             display: grid;
             gap: 8px;
+            margin-top: 2px;
         }
 
         .detail-block strong {
@@ -443,11 +459,16 @@
             letter-spacing: 0.06em;
             text-transform: uppercase;
             color: var(--muted);
+            line-height: 1.2;
         }
 
         .detail-block pre {
             min-height: 0;
             margin: 0;
+        }
+
+        .topic-card .inline-actions {
+            margin-top: 2px;
         }
 
         .empty-state {
@@ -656,22 +677,12 @@
                         <div class="card-body stack">
                             <div>
                                 <h2 id="libraryListTitle">Popular Tutorials</h2>
-                                <p id="libraryListDescription" class="meta">Search within the active language and choose a lesson to open the full explanation.</p>
+                                <p id="libraryListDescription" class="meta">Search within the active language and choose a lesson to expand it right here.</p>
                             </div>
                             <div class="tutorial-search">
                                 <input id="tutorialSearchInput" type="text" placeholder="Search tutorials">
                             </div>
                             <div id="topicList" class="topic-list"></div>
-                        </div>
-                    </article>
-
-                    <article class="card">
-                        <div class="card-body stack">
-                            <div>
-                                <h2 id="detailTitle">Selected Tutorial</h2>
-                                <p id="detailDescription" class="meta">Read the concept, inspect the syntax, and load the full sample into the runner.</p>
-                            </div>
-                            <div id="tutorialDetail" class="detail-card"></div>
                         </div>
                     </article>
                 </div>
@@ -729,7 +740,6 @@
         const languageList = document.getElementById("languageList");
         const topicList = document.getElementById("topicList");
         const referenceList = document.getElementById("referenceList");
-        const tutorialDetail = document.getElementById("tutorialDetail");
         const tutorialSearchInput = document.getElementById("tutorialSearchInput");
         const tutorialBackButton = document.getElementById("tutorialBackButton");
         const learningEyebrow = document.getElementById("learningEyebrow");
@@ -737,8 +747,6 @@
         const learningDescription = document.getElementById("learningDescription");
         const libraryListTitle = document.getElementById("libraryListTitle");
         const libraryListDescription = document.getElementById("libraryListDescription");
-        const detailTitle = document.getElementById("detailTitle");
-        const detailDescription = document.getElementById("detailDescription");
         const referenceTitle = document.getElementById("referenceTitle");
         const referenceDescription = document.getElementById("referenceDescription");
 
@@ -1011,6 +1019,30 @@ echo "Hello from Cloud FaaS\\n";`,
             return text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
         }
 
+        function buildExpandedDetailMarkup(item) {
+            return `
+                <div class="detail-meta">
+                    <span class="pill">${getLanguageLabel(item.language)}</span>
+                    <span class="pill">Beginner Friendly</span>
+                </div>
+                <div class="detail-block">
+                    <strong>Syntax Example</strong>
+                    <pre>${escapeHtml(item.syntax)}</pre>
+                </div>
+                <div class="detail-block">
+                    <strong>Full Working Code</strong>
+                    <pre>${escapeHtml(item.code)}</pre>
+                </div>
+                <div class="detail-block">
+                    <strong>Expected Output</strong>
+                    <pre>${escapeHtml(item.output)}</pre>
+                </div>
+                <div class="inline-actions">
+                    <button class="run-button" type="button" data-run-item="${item.id}">Try this in Code Runner</button>
+                </div>
+            `;
+        }
+
         function renderLanguageList() {
             languageList.innerHTML = Object.entries(getActiveLibrary()).map(([key, value]) => `
                 <button class="language-chip ${key === activeTutorialLanguage ? "active" : ""}" type="button" data-language="${key}">
@@ -1037,29 +1069,31 @@ echo "Hello from Cloud FaaS\\n";`,
             if (!items.length) {
                 activeTutorialId = "";
                 topicList.innerHTML = `<div class="empty-state">No ${label} match this search yet. Try a broader keyword.</div>`;
-                tutorialDetail.innerHTML = `
-                    <h3>No ${learningMode === "tutorials" ? "Tutorial" : "Example"} Selected</h3>
-                    <p>Clear the search or choose another language to keep browsing ${label}.</p>
-                `;
                 return false;
-            }
-
-            if (!items.some((item) => item.id === activeTutorialId)) {
-                activeTutorialId = items[0].id;
             }
 
             topicList.innerHTML = items.map((item) => `
                 <article class="topic-card ${item.id === activeTutorialId ? "active" : ""}" data-topic-id="${item.id}">
                     <h3>${item.title}</h3>
                     <p>${item.description}</p>
+                    ${item.id === activeTutorialId ? buildExpandedDetailMarkup(item) : ""}
                 </article>
             `).join("");
 
             topicList.querySelectorAll("[data-topic-id]").forEach((card) => {
                 card.addEventListener("click", () => {
-                    activeTutorialId = card.dataset.topicId;
+                    activeTutorialId = activeTutorialId === card.dataset.topicId ? "" : card.dataset.topicId;
                     renderTopicList();
-                    renderTutorialDetail();
+                });
+            });
+
+            topicList.querySelectorAll("[data-run-item]").forEach((button) => {
+                button.addEventListener("click", (event) => {
+                    event.stopPropagation();
+                    const item = items.find((entry) => entry.id === button.dataset.runItem);
+                    if (item) {
+                        openRunnerWithCode(item.language, item.code);
+                    }
                 });
             });
 
@@ -1076,49 +1110,6 @@ echo "Hello from Cloud FaaS\\n";`,
             `).join("");
         }
 
-        function renderTutorialDetail() {
-            const item = getActiveItem();
-            if (!item) {
-                tutorialDetail.innerHTML = `
-                    <h3>No ${learningMode === "tutorials" ? "Tutorial" : "Example"} Selected</h3>
-                    <p>Choose an item from the list to open the explanation and code sample.</p>
-                `;
-                return;
-            }
-
-            tutorialDetail.innerHTML = `
-                <div>
-                    <div class="detail-meta">
-                        <span class="pill">${getLanguageLabel(item.language)}</span>
-                        <span class="pill">Beginner Friendly</span>
-                    </div>
-                </div>
-                <div>
-                    <h3>${item.title}</h3>
-                    <p>${item.description}</p>
-                </div>
-                <div class="detail-block">
-                    <strong>Syntax Example</strong>
-                    <pre>${escapeHtml(item.syntax)}</pre>
-                </div>
-                <div class="detail-block">
-                    <strong>Full Working Code</strong>
-                    <pre>${escapeHtml(item.code)}</pre>
-                </div>
-                <div class="detail-block">
-                    <strong>Expected Output</strong>
-                    <pre>${escapeHtml(item.output)}</pre>
-                </div>
-                <div class="inline-actions">
-                    <button id="tryTutorialButton" class="run-button" type="button">Try this in Code Runner</button>
-                </div>
-            `;
-
-            document.getElementById("tryTutorialButton").addEventListener("click", () => {
-                openRunnerWithCode(item.language, item.code);
-            });
-        }
-
         function updateLearningMeta() {
             const isTutorials = learningMode === "tutorials";
             tutorialsNavButton.classList.toggle("active", currentView === "tutorials" && isTutorials);
@@ -1132,12 +1123,8 @@ echo "Hello from Cloud FaaS\\n";`,
                 : "Open hands-on examples, study common programming patterns, and push working code straight into the runner when you want to test it.";
             libraryListTitle.textContent = isTutorials ? "Popular Tutorials" : "Popular Examples";
             libraryListDescription.textContent = isTutorials
-                ? "Search within the active language and choose a lesson to open the full explanation."
-                : "Search within the active language and choose a runnable example to inspect and practice.";
-            detailTitle.textContent = isTutorials ? "Selected Tutorial" : "Selected Example";
-            detailDescription.textContent = isTutorials
-                ? "Read the concept, inspect the syntax, and load the full sample into the runner."
-                : "Study the solution, inspect the syntax, and load the full sample into the runner.";
+                ? "Search within the active language and choose a lesson to expand it right here."
+                : "Search within the active language and choose a runnable example to expand it right here.";
             referenceTitle.textContent = isTutorials ? "Reference Materials" : "Example Notes";
             referenceDescription.textContent = isTutorials
                 ? "Small lookup notes for the active language while you study."
@@ -1148,11 +1135,8 @@ echo "Hello from Cloud FaaS\\n";`,
         function renderLearningView() {
             updateLearningMeta();
             renderLanguageList();
-            const hasItems = renderTopicList();
+            renderTopicList();
             renderReferenceList();
-            if (hasItems) {
-                renderTutorialDetail();
-            }
         }
 
         function openLearningMode(nextMode) {
@@ -1282,10 +1266,7 @@ echo "Hello from Cloud FaaS\\n";`,
             scrollToRunner();
         });
         tutorialSearchInput.addEventListener("input", () => {
-            const hasItems = renderTopicList();
-            if (hasItems) {
-                renderTutorialDetail();
-            }
+            renderTopicList();
         });
 
         function resetInteractiveState({ preserveOutput = false, message = "Waiting for a run..." } = {}) {
