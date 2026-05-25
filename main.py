@@ -3,6 +3,7 @@ from typing import Optional
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from runner import (
@@ -26,6 +27,8 @@ app = FastAPI(
     description="A minimal Function-as-a-Service API that runs submitted code inside Docker containers.",
     version="2.1.0",
 )
+
+app.mount("/static", StaticFiles(directory=APP_ROOT / "web"), name="static")
 
 
 class FunctionRequest(BaseModel):

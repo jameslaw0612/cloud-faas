@@ -75,14 +75,15 @@ class InteractiveSession:
     cleanup_lock: threading.Lock = field(default_factory=threading.Lock)
 
 
-def _build_code_archive(filename: str, code: str) -> bytes:
-    data = code.encode("utf-8")
+def _build_code_archive(files: dict[str, str]) -> bytes:
     archive_stream = io.BytesIO()
 
     with tarfile.open(fileobj=archive_stream, mode="w") as archive:
-        info = tarfile.TarInfo(name=filename)
-        info.size = len(data)
-        archive.addfile(info, io.BytesIO(data))
+        for filename, contents in files.items():
+            data = contents.encode("utf-8")
+            info = tarfile.TarInfo(name=filename)
+            info.size = len(data)
+            archive.addfile(info, io.BytesIO(data))
 
     archive_stream.seek(0)
     return archive_stream.read()
@@ -186,7 +187,7 @@ def start_interactive_session(language: str, code: str) -> dict:
             tty=True,
         )
 
-        archive = _build_code_archive(runtime["filename"], code)
+        archive = _build_code_archive({runtime["filename"]: code})
         container.put_archive("/function", archive)
 
         socket = container.attach_socket(
@@ -473,7 +474,7 @@ def run_function(
             detach=True,
         )
 
-        archive = _build_code_archive(runtime["filename"], code)
+        archive = _build_code_archive({runtime["filename"]: code})
         container.put_archive("/function", archive)
         container.start()
 
