@@ -15,6 +15,8 @@
         const languageSelect = document.getElementById("language");
         const codeInput = document.getElementById("codeInput");
         const fileInput = document.getElementById("fileInput");
+        const inputFileInput = document.getElementById("inputFileInput");
+        const deliveryModeSelect = document.getElementById("deliveryMode");
         const interactiveSection = document.getElementById("interactiveSection");
         const interactiveTitle = document.getElementById("interactiveTitle");
         const interactiveDescription = document.getElementById("interactiveDescription");
@@ -22,6 +24,13 @@
         const interactiveStopButton = document.getElementById("interactiveStopButton");
         const interactiveSendButton = document.getElementById("interactiveSendButton");
         const interactiveInput = document.getElementById("interactiveInput");
+        const downloadSection = document.getElementById("downloadSection");
+        const downloadFilename = document.getElementById("downloadFilename");
+        const downloadMeta = document.getElementById("downloadMeta");
+        const downloadPreview = document.getElementById("downloadPreview");
+        const downloadPreviewImage = document.getElementById("downloadPreviewImage");
+        const downloadLink = document.getElementById("downloadLink");
+        const downloadOpenLink = document.getElementById("downloadOpenLink");
         const languageList = document.getElementById("languageList");
         const topicList = document.getElementById("topicList");
         const referenceList = document.getElementById("referenceList");
@@ -50,6 +59,12 @@
             cpp: "C++",
             java: "Java",
             php: "PHP",
+        };
+
+        const deliveryModeLabels = {
+            inline: "Inline Result",
+            "json-download": "JSON + Download Link",
+            "direct-download": "Direct File Download",
         };
 
         const runnerTemplates = {
@@ -169,6 +184,7 @@ echo "Hello from Cloud FaaS\\n";`,
                 { id: "python-patterns", title: "Print Pyramids and Patterns", description: "Nested loops help you print repeated shapes line by line.", syntax: 'for row in range(1, height + 1):\n    print("*" * row)', code: 'height = 5\n\nfor row in range(1, height + 1):\n    print("*" * row)', output: "*\n**\n***\n****\n*****", language: "python" },
                 { id: "python-prime", title: "Check prime number", description: "Try dividing the number by every value from 2 up to its square root.", syntax: "for divisor in range(2, int(number ** 0.5) + 1):", code: 'number = 29\nis_prime = number > 1\n\nfor divisor in range(2, int(number ** 0.5) + 1):\n    if number % divisor == 0:\n        is_prime = False\n        break\n\nprint("Prime" if is_prime else "Not prime")', output: "Prime", language: "python" },
                 { id: "python-fibonacci", title: "Print the Fibonacci series", description: "Keep track of the previous two values and update them each loop.", syntax: "a, b = 0, 1\nfor _ in range(count):", code: 'count = 7\na, b = 0, 1\n\nfor _ in range(count):\n    print(a)\n    a, b = b, a + b', output: "0\n1\n1\n2\n3\n5\n8", language: "python" },
+                { id: "python-grayscale-image", title: "Turn an uploaded image into grayscale", description: "Upload an image file, let Pillow open it, convert it to grayscale, and return the transformed PNG back through Cloud FaaS.", syntax: 'gray_image = image.convert("L")', code: 'import base64\nimport io\nimport json\nfrom pathlib import Path\n\nfrom PIL import Image\n\nsupported_extensions = {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp"}\ncurrent_dir = Path(".")\nimage_path = next(\n    (\n        path for path in current_dir.iterdir()\n        if path.is_file() and path.suffix.lower() in supported_extensions and path.name != "handler.py"\n    ),\n    None,\n)\n\nif image_path is None:\n    raise FileNotFoundError("Upload an image in the Optional input file field before running this example.")\n\nwith Image.open(image_path) as image:\n    grayscale_image = image.convert("L")\n    buffer = io.BytesIO()\n    grayscale_image.save(buffer, format="PNG")\n\npayload = {\n    "faas_download": {\n        "filename": f"{image_path.stem}-grayscale.png",\n        "content_type": "image/png",\n        "base64": base64.b64encode(buffer.getvalue()).decode("ascii"),\n        "output": f"Prepared {image_path.stem}-grayscale.png"\n    }\n}\n\nprint(json.dumps(payload))', output: "Prepared photo-grayscale.png", language: "python" },
             ]},
             javascript: { name: "JavaScript", references: [
                 { title: "Practice Focus", description: "Conditionals, loops, math, arrays, and basic Node.js console input." },
@@ -245,8 +261,92 @@ echo "Hello from Cloud FaaS\\n";`,
             return languageLabels[language] || language.toUpperCase();
         }
 
+        function getDeliveryModeLabel(value) {
+            return deliveryModeLabels[value] || value;
+        }
+
+        function getSubmissionSourceLabel() {
+            return mode === "upload" ? "Uploaded File" : "Pasted Code";
+        }
+
         function scrollToRunner() {
             runnerView.scrollIntoView({ behavior: "smooth", block: "start" });
+        }
+
+        function clearDownloadState() {
+            downloadSection.classList.add("hidden");
+            downloadFilename.textContent = "No artifact yet";
+            downloadMeta.textContent = "";
+            downloadPreview.classList.add("hidden");
+            downloadPreviewImage.removeAttribute("src");
+            downloadLink.href = "#";
+            downloadOpenLink.href = "#";
+            downloadLink.removeAttribute("download");
+        }
+
+        function showDownloadArtifact(artifact) {
+            if (!artifact) {
+                clearDownloadState();
+                return;
+            }
+
+            downloadSection.classList.remove("hidden");
+            downloadFilename.textContent = artifact.artifact_filename;
+            downloadMeta.textContent = `${artifact.artifact_content_type} · ${artifact.artifact_size_bytes.toLocaleString()} bytes`;
+            downloadLink.href = artifact.artifact_download_url;
+            downloadLink.setAttribute("download", artifact.artifact_filename);
+            downloadOpenLink.href = artifact.artifact_download_url;
+
+            const isPreviewableImage = (artifact.artifact_content_type || "").startsWith("image/");
+            downloadPreview.classList.toggle("hidden", !isPreviewableImage);
+            if (isPreviewableImage) {
+                downloadPreviewImage.src = artifact.artifact_download_url;
+                downloadPreviewImage.alt = artifact.artifact_filename;
+            } else {
+                downloadPreviewImage.removeAttribute("src");
+            }
+        }
+
+        function parseFilenameFromDisposition(disposition, fallback = "cloud-faas-download.bin") {
+            if (!disposition) {
+                return fallback;
+            }
+
+            const utfMatch = disposition.match(/filename\*=UTF-8''([^;]+)/i);
+            if (utfMatch) {
+                return decodeURIComponent(utfMatch[1]);
+            }
+
+            const basicMatch = disposition.match(/filename="?([^"]+)"?/i);
+            return basicMatch ? basicMatch[1] : fallback;
+        }
+
+        async function parseErrorPayload(response) {
+            const contentType = response.headers.get("content-type") || "";
+            if (contentType.includes("application/json")) {
+                const data = await response.json();
+                return data.detail || data;
+            }
+
+            const text = await response.text();
+            return { error: `Request failed with status ${response.status}`, details: text || response.statusText };
+        }
+
+        function triggerBrowserDownload(blob, filename) {
+            const objectUrl = URL.createObjectURL(blob);
+            const anchor = document.createElement("a");
+            anchor.href = objectUrl;
+            anchor.download = filename;
+            document.body.appendChild(anchor);
+            anchor.click();
+            anchor.remove();
+            setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+        }
+
+        function appendOptionalInputFile(formData) {
+            if (inputFileInput.files.length) {
+                formData.append("input_file", inputFileInput.files[0]);
+            }
         }
 
         function setView(view) {
@@ -504,7 +604,7 @@ echo "Hello from Cloud FaaS\\n";`,
                 const response = await fetch("/api/status");
                 const data = await response.json();
                 const supported = data.supported_languages.map(getLanguageLabel).join(", ");
-                statusBadge.innerHTML = `<span class="status-dot"></span><span>${data.message} Supported: ${supported}</span>`;
+                statusBadge.innerHTML = `<span class="status-dot"></span><span>${data.message} Supported: ${supported}. Downloads: ${data.artifact_delivery_modes.join(", ")}</span>`;
             } catch (error) {
                 statusBadge.innerHTML = `<span class="status-dot" style="background: var(--error);"></span><span>API status unavailable</span>`;
             }
@@ -521,13 +621,15 @@ echo "Hello from Cloud FaaS\\n";`,
                 }
 
                 historyList.innerHTML = data.map((item) => {
-                    const title = `${getLanguageLabel(item.language)} - ${item.request_source}`;
-                    const subtitle = item.submitted_file || "inline code";
+                    const title = `${getLanguageLabel(item.language)}`;
+                    const subtitle = item.request_source || "Inline Result";
+                    const fileLabel = item.submitted_file ? `<div class="meta">${item.submitted_file}</div>` : "";
                     const preview = item.output_preview || "(No output preview)";
                     return `
                         <div class="history-item">
                             <strong>${title}</strong>
                             <div class="meta">${subtitle}</div>
+                            ${fileLabel}
                             <div class="meta">${new Date(item.timestamp).toLocaleString()}</div>
                             <div class="meta">${preview}</div>
                         </div>
@@ -747,22 +849,99 @@ echo "Hello from Cloud FaaS\\n";`,
                 }
 
                 await stopInteractiveSession({ preserveOutput: true });
+                clearDownloadState();
                 resultOutput.classList.remove("result-error");
                 resultOutput.textContent = "Executing function...";
 
+                const deliveryMode = deliveryModeSelect.value;
+
+                if (deliveryMode === "direct-download") {
+                    if (mode === "code") {
+                        if (inputFileInput.files.length) {
+                            const formData = new FormData();
+                            formData.append("language", languageSelect.value);
+                            formData.append("code", codeInput.value);
+                            formData.append("submission_source", getSubmissionSourceLabel());
+                            appendOptionalInputFile(formData);
+
+                            response = await fetch("/run/with-input/download", {
+                                method: "POST",
+                                body: formData,
+                            });
+                        } else {
+                            response = await fetch("/run/download", {
+                                method: "POST",
+                                headers: { "Content-Type": "application/json" },
+                                body: JSON.stringify({
+                                    language: languageSelect.value,
+                                    code: codeInput.value,
+                                    submission_source: getSubmissionSourceLabel(),
+                                }),
+                            });
+                        }
+                    } else {
+                        const formData = new FormData();
+                        formData.append("language", languageSelect.value);
+                        formData.append("file", fileInput.files[0]);
+                        appendOptionalInputFile(formData);
+
+                        response = await fetch("/run/upload/download", {
+                            method: "POST",
+                            body: formData,
+                        });
+                    }
+
+                    if (!response.ok) {
+                        const payload = await parseErrorPayload(response);
+                        setResultMessage(formatResult(payload), {
+                            isError: Boolean(payload.error),
+                        });
+                        return;
+                    }
+
+                    const blob = await response.blob();
+                    const filename = parseFilenameFromDisposition(
+                        response.headers.get("content-disposition"),
+                        response.headers.get("X-Cloud-FaaS-Filename") || `${languageSelect.value}-download.bin`
+                    );
+                    triggerBrowserDownload(blob, filename);
+                    setResultMessage(response.headers.get("X-Cloud-FaaS-Output-Preview") || `Downloaded ${filename}`);
+                    await loadHistory();
+                    return;
+                }
+
                 if (mode === "code") {
-                    response = await fetch("/run", {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({
-                            language: languageSelect.value,
-                            code: codeInput.value,
-                        }),
-                    });
+                    if (inputFileInput.files.length) {
+                        const formData = new FormData();
+                        formData.append("language", languageSelect.value);
+                        formData.append("code", codeInput.value);
+                        formData.append("request_source", getDeliveryModeLabel(deliveryMode));
+                        formData.append("submission_source", getSubmissionSourceLabel());
+                        appendOptionalInputFile(formData);
+
+                        response = await fetch("/run/with-input", {
+                            method: "POST",
+                            body: formData,
+                        });
+                    } else {
+                        response = await fetch("/run", {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({
+                                language: languageSelect.value,
+                                code: codeInput.value,
+                                request_source: getDeliveryModeLabel(deliveryMode),
+                                submission_source: getSubmissionSourceLabel(),
+                            }),
+                        });
+                    }
                 } else {
                     const formData = new FormData();
                     formData.append("language", languageSelect.value);
                     formData.append("file", fileInput.files[0]);
+                    formData.append("request_source", getDeliveryModeLabel(deliveryMode));
+                    formData.append("submission_source", getSubmissionSourceLabel());
+                    appendOptionalInputFile(formData);
 
                     response = await fetch("/run/upload", {
                         method: "POST",
@@ -774,6 +953,10 @@ echo "Hello from Cloud FaaS\\n";`,
                 setResultMessage(formatResult(data.detail || data), {
                     isError: Boolean((data.detail || data).error),
                 });
+                const payload = data.detail || data;
+                if (payload.artifact) {
+                    showDownloadArtifact(payload.artifact);
+                }
                 await loadHistory();
             } catch (error) {
                 setResultMessage(error.message, { isError: true });
@@ -786,6 +969,7 @@ echo "Hello from Cloud FaaS\\n";`,
         setView("runner");
         renderLearningView();
         setMode("code");
+        clearDownloadState();
         loadStatus();
         loadHistory();
     

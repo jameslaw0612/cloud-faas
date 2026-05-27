@@ -1,11 +1,14 @@
+import base64
 import io
 import json
+import mimetypes
+import re
 import tarfile
 import threading
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from queue import Empty, Queue
 
 import docker
@@ -15,10 +18,15 @@ from docker.errors import DockerException, ImageNotFound
 TIMEOUT_SECONDS = 10
 MAX_CODE_SIZE_BYTES = 100_000
 MAX_OUTPUT_PREVIEW_LENGTH = 400
+MAX_ARTIFACT_SIZE_BYTES = 5_000_000
+ARTIFACTS_DIR_NAME = "artifacts"
+DOWNLOADS_DIR_NAME = "faas_downloads"
+DOWNLOADS_DIR_PATH = f"/function/{DOWNLOADS_DIR_NAME}"
 
 APP_ROOT = Path(__file__).parent
 DATA_DIR = APP_ROOT / "data"
 HISTORY_FILE = DATA_DIR / "executions.jsonl"
+ARTIFACTS_DIR = DATA_DIR / ARTIFACTS_DIR_NAME
 
 RUNTIME_CONFIGS = {
     "python": {
@@ -75,12 +83,17 @@ class InteractiveSession:
     cleanup_lock: threading.Lock = field(default_factory=threading.Lock)
 
 
-def _build_code_archive(files: dict[str, str]) -> bytes:
+def _build_code_archive(files: dict[str, str | bytes]) -> bytes:
     archive_stream = io.BytesIO()
 
     with tarfile.open(fileobj=archive_stream, mode="w") as archive:
+        directory_info = tarfile.TarInfo(name=DOWNLOADS_DIR_NAME)
+        directory_info.type = tarfile.DIRTYPE
+        directory_info.mode = 0o777
+        archive.addfile(directory_info)
+
         for filename, contents in files.items():
-            data = contents.encode("utf-8")
+            data = contents.encode("utf-8") if isinstance(contents, str) else contents
             info = tarfile.TarInfo(name=filename)
             info.size = len(data)
             archive.addfile(info, io.BytesIO(data))
@@ -93,12 +106,150 @@ def _get_docker_client():
     return docker.from_env()
 
 
+def _format_docker_unavailable_details(exc: Exception) -> str:
+    details = str(exc)
+    lowered = details.lower()
+
+    if "permission denied" in lowered and "docker api" in lowered:
+        return (
+            "Docker Desktop is running, but this app user cannot access the Docker engine. "
+            "Add the current Windows user to the docker-users group, then sign out and sign back in."
+        )
+
+    if "the system cannot find the file specified" in lowered or "pipe/docker_engine" in lowered:
+        return (
+            "Docker Desktop is not running or the Docker engine pipe is unavailable. "
+            "Start Docker Desktop and wait until it reports that Docker is running."
+        )
+
+    return details
+
+
 INTERACTIVE_SESSIONS: dict[str, InteractiveSession] = {}
 INTERACTIVE_SESSIONS_LOCK = threading.Lock()
 
 
 def get_runtime_extension(language: str) -> str:
     return RUNTIME_CONFIGS[language]["extension"]
+
+
+def _sanitize_filename(filename: str | None, fallback: str = "download.bin") -> str:
+    candidate = (filename or "").strip()
+    if not candidate:
+        candidate = fallback
+    candidate = PurePosixPath(candidate).name
+    candidate = re.sub(r"[^A-Za-z0-9._-]", "-", candidate)
+    return candidate or fallback
+
+
+def _infer_content_type(filename: str, fallback: str = "application/octet-stream") -> str:
+    guessed, _ = mimetypes.guess_type(filename)
+    return guessed or fallback
+
+
+def save_artifact_bytes(
+    filename: str,
+    data: bytes,
+    *,
+    content_type: str | None = None,
+) -> dict:
+    if len(data) > MAX_ARTIFACT_SIZE_BYTES:
+        raise ValueError(f"Artifacts must be {MAX_ARTIFACT_SIZE_BYTES} bytes or smaller.")
+
+    ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
+    safe_filename = _sanitize_filename(filename)
+    artifact_id = f"{uuid.uuid4().hex}__{safe_filename}"
+    artifact_path = ARTIFACTS_DIR / artifact_id
+    artifact_path.write_bytes(data)
+
+    return {
+        "artifact_id": artifact_id,
+        "artifact_filename": safe_filename,
+        "artifact_content_type": content_type or _infer_content_type(safe_filename),
+        "artifact_size_bytes": len(data),
+        "artifact_download_url": f"/artifacts/{artifact_id}",
+    }
+
+
+def get_saved_artifact(artifact_id: str) -> tuple[Path, str] | None:
+    safe_id = Path(artifact_id).name
+    artifact_path = ARTIFACTS_DIR / safe_id
+    if not artifact_path.exists() or not artifact_path.is_file():
+        return None
+
+    filename = safe_id.split("__", 1)[1] if "__" in safe_id else safe_id
+    return artifact_path, filename
+
+
+def _read_tar_stream(bits) -> io.BytesIO:
+    archive_stream = io.BytesIO()
+    for chunk in bits:
+        archive_stream.write(chunk)
+    archive_stream.seek(0)
+    return archive_stream
+
+
+def _extract_saved_artifact(container) -> dict | None:
+    try:
+        bits, _ = container.get_archive(DOWNLOADS_DIR_PATH)
+    except Exception:
+        return None
+
+    archive_stream = _read_tar_stream(bits)
+    with tarfile.open(fileobj=archive_stream, mode="r:*") as archive:
+        file_members = sorted(
+            (member for member in archive.getmembers() if member.isfile()),
+            key=lambda member: member.name,
+        )
+
+        if not file_members:
+            return None
+
+        member = file_members[0]
+        extracted = archive.extractfile(member)
+        if extracted is None:
+            return None
+
+        data = extracted.read()
+        filename = PurePosixPath(member.name).name or "download.bin"
+        return save_artifact_bytes(filename, data)
+
+
+def _parse_base64_artifact(stdout: str, language: str) -> tuple[dict, str] | None:
+    stripped = stdout.strip()
+    if not stripped:
+        return None
+
+    try:
+        payload = json.loads(stripped)
+    except json.JSONDecodeError:
+        return None
+
+    if not isinstance(payload, dict):
+        return None
+
+    artifact_payload = payload.get("faas_download")
+    if not isinstance(artifact_payload, dict):
+        return None
+
+    base64_data = artifact_payload.get("base64")
+    if not isinstance(base64_data, str) or not base64_data.strip():
+        raise ValueError("faas_download.base64 must be a non-empty base64 string.")
+
+    try:
+        data = base64.b64decode(base64_data, validate=True)
+    except Exception as exc:
+        raise ValueError("faas_download.base64 is not valid base64.") from exc
+
+    filename = artifact_payload.get("filename") or f"{language}-download.bin"
+    content_type = artifact_payload.get("content_type") or None
+    artifact = save_artifact_bytes(filename, data, content_type=content_type)
+
+    output_message = artifact_payload.get("output") or payload.get("output") or ""
+    if not isinstance(output_message, str):
+        output_message = ""
+
+    return artifact, output_message
 
 
 def _discard_interactive_session(session_id: str) -> None:
@@ -255,7 +406,7 @@ def start_interactive_session(language: str, code: str) -> dict:
                 pass
         return {
             "error": "Docker is unavailable",
-            "details": str(exc),
+            "details": _format_docker_unavailable_details(exc),
         }
     except Exception as exc:
         if socket is not None:
@@ -365,6 +516,7 @@ def _make_history_record(
     language: str,
     submitted_file: str | None,
     request_source: str,
+    submission_source: str | None,
     response: dict,
 ) -> dict:
     output_preview = (response.get("output") or response.get("details") or "").strip()
@@ -376,6 +528,7 @@ def _make_history_record(
         "language": language,
         "submitted_file": submitted_file,
         "request_source": request_source,
+        "submission_source": submission_source,
         "success": response.get("error") is None,
         "exit_code": response.get("exit_code"),
         "output_preview": output_preview,
@@ -400,6 +553,8 @@ def run_function(
     *,
     submitted_file: str | None = None,
     request_source: str = "json",
+    submission_source: str | None = None,
+    input_files: dict[str, bytes] | None = None,
 ) -> dict:
     normalized_language = language.strip().lower()
     runtime = RUNTIME_CONFIGS.get(normalized_language)
@@ -411,12 +566,14 @@ def run_function(
             "language": normalized_language,
             "submitted_file": submitted_file,
             "request_source": request_source,
+            "submission_source": submission_source,
         }
         _write_history(
             _make_history_record(
                 language=normalized_language,
                 submitted_file=submitted_file,
                 request_source=request_source,
+                submission_source=submission_source,
                 response=response,
             )
         )
@@ -430,12 +587,14 @@ def run_function(
             "language": normalized_language,
             "submitted_file": submitted_file,
             "request_source": request_source,
+            "submission_source": submission_source,
         }
         _write_history(
             _make_history_record(
                 language=normalized_language,
                 submitted_file=submitted_file,
                 request_source=request_source,
+                submission_source=submission_source,
                 response=response,
             )
         )
@@ -448,12 +607,14 @@ def run_function(
             "language": normalized_language,
             "submitted_file": submitted_file,
             "request_source": request_source,
+            "submission_source": submission_source,
         }
         _write_history(
             _make_history_record(
                 language=normalized_language,
                 submitted_file=submitted_file,
                 request_source=request_source,
+                submission_source=submission_source,
                 response=response,
             )
         )
@@ -474,7 +635,11 @@ def run_function(
             detach=True,
         )
 
-        archive = _build_code_archive({runtime["filename"]: code})
+        archive_files: dict[str, str | bytes] = {runtime["filename"]: code}
+        if input_files:
+            archive_files.update(input_files)
+
+        archive = _build_code_archive(archive_files)
         container.put_archive("/function", archive)
         container.start()
 
@@ -488,12 +653,14 @@ def run_function(
                 "language": normalized_language,
                 "submitted_file": submitted_file,
                 "request_source": request_source,
+                "submission_source": submission_source,
             }
             _write_history(
                 _make_history_record(
                     language=normalized_language,
                     submitted_file=submitted_file,
                     request_source=request_source,
+                    submission_source=submission_source,
                     response=response,
                 )
             )
@@ -516,31 +683,88 @@ def run_function(
                 "language": normalized_language,
                 "submitted_file": submitted_file,
                 "request_source": request_source,
+                "submission_source": submission_source,
             }
             _write_history(
                 _make_history_record(
                     language=normalized_language,
                     submitted_file=submitted_file,
                     request_source=request_source,
+                    submission_source=submission_source,
                     response=response,
                 )
             )
             return response
 
+        try:
+            parsed_artifact = _parse_base64_artifact(stdout, normalized_language)
+        except ValueError as exc:
+            response = {
+                "error": "Invalid download payload",
+                "details": str(exc),
+                "exit_code": exit_code,
+                "language": normalized_language,
+                "submitted_file": submitted_file,
+                "request_source": request_source,
+                "submission_source": submission_source,
+            }
+            _write_history(
+                _make_history_record(
+                    language=normalized_language,
+                    submitted_file=submitted_file,
+                    request_source=request_source,
+                    submission_source=submission_source,
+                    response=response,
+                )
+            )
+            return response
+
+        artifact = None
+        output = stdout
+        if parsed_artifact is not None:
+            artifact, artifact_output = parsed_artifact
+            output = artifact_output or f"Download prepared: {artifact['artifact_filename']}"
+        else:
+            try:
+                artifact = _extract_saved_artifact(container)
+            except ValueError as exc:
+                response = {
+                    "error": "Artifact is too large",
+                    "details": str(exc),
+                    "exit_code": exit_code,
+                    "language": normalized_language,
+                    "submitted_file": submitted_file,
+                    "request_source": request_source,
+                    "submission_source": submission_source,
+                }
+                _write_history(
+                    _make_history_record(
+                        language=normalized_language,
+                        submitted_file=submitted_file,
+                        request_source=request_source,
+                        submission_source=submission_source,
+                        response=response,
+                    )
+                )
+                return response
+
         response = {
-            "output": stdout,
+            "output": output,
             "error": None,
             "details": None,
             "exit_code": exit_code,
             "language": normalized_language,
             "submitted_file": submitted_file,
             "request_source": request_source,
+            "submission_source": submission_source,
+            "artifact": artifact,
         }
         _write_history(
             _make_history_record(
                 language=normalized_language,
                 submitted_file=submitted_file,
                 request_source=request_source,
+                submission_source=submission_source,
                 response=response,
             )
         )
@@ -552,12 +776,14 @@ def run_function(
             "language": normalized_language,
             "submitted_file": submitted_file,
             "request_source": request_source,
+            "submission_source": submission_source,
         }
         _write_history(
             _make_history_record(
                 language=normalized_language,
                 submitted_file=submitted_file,
                 request_source=request_source,
+                submission_source=submission_source,
                 response=response,
             )
         )
@@ -565,16 +791,18 @@ def run_function(
     except DockerException as exc:
         response = {
             "error": "Docker is unavailable",
-            "details": str(exc),
+            "details": _format_docker_unavailable_details(exc),
             "language": normalized_language,
             "submitted_file": submitted_file,
             "request_source": request_source,
+            "submission_source": submission_source,
         }
         _write_history(
             _make_history_record(
                 language=normalized_language,
                 submitted_file=submitted_file,
                 request_source=request_source,
+                submission_source=submission_source,
                 response=response,
             )
         )
@@ -586,12 +814,14 @@ def run_function(
             "language": normalized_language,
             "submitted_file": submitted_file,
             "request_source": request_source,
+            "submission_source": submission_source,
         }
         _write_history(
             _make_history_record(
                 language=normalized_language,
                 submitted_file=submitted_file,
                 request_source=request_source,
+                submission_source=submission_source,
                 response=response,
             )
         )
